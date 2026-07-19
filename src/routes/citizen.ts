@@ -1,0 +1,201 @@
+import { Router, Request, Response } from 'express';
+import { requireCitizen, getSessionCitizenId } from '../middleware/requireAuth';
+import { supabaseAdmin } from '../supabase';
+import { auditLog } from '../services/audit';
+import { classifyEmergencyMessage } from '../services/groq';
+
+const router = Router();
+
+// All citizen routes require authentication
+router.use(requireCitizen);
+
+/**
+ * GET /api/citizen/profile
+ * Returns only the authenticated citizen's own profile.
+ * NEVER returns access_token.
+ * NEVER accepts citizen_id from request — always derives from session.
+ */
+router.get('/profile', async (req: Request, res: Response): Promise<void> => {
+  // SECURITY: Citizen ID comes ONLY from session, never from request params
+  const citizenId = getSessionCitizenId(req);
+
+  const { data, error } = await supabaseAdmin
+    .from('citizens')
+    .select('id, name, status, risk_score, latitude, longitude, children_count, elderly_count, mobility_issues')
+    .eq('id', citizenId)
+    .maybeSingle();
+
+  if (error || !data) {
+    res.status(404).json({ error: 'Citizen not found.' });
+    return;
+  }
+
+  res.json({ citizen: data });
+});
+
+/**
+ * GET /api/citizen/messages
+ * Returns messages for the authenticated citizen only.
+ * Backend ignores any citizen_id or id parameters in the request.
+ */
+router.get('/messages', async (req: Request, res: Response): Promise<void> => {
+  // SECURITY: Always uses session citizen_id — ignores any supplied params
+  const citizenId = getSessionCitizenId(req);
+
+  const { data, error } = await supabaseAdmin
+    .from('emergency_messages')
+    .select('id, sender_type, message, message_type, created_at, read_at, metadata')
+    .eq('citizen_id', citizenId)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    res.status(500).json({ error: 'Failed to fetch messages.' });
+    return;
+  }
+
+  res.json({ messages: data || [] });
+});
+
+/**
+ * POST /api/citizen/messages
+ * Sends a message from the authenticated citizen.
+ * Backend automatically sets citizen_id and sender_type = CITIZEN.
+ * Frontend CANNOT supply their own citizen_id.
+ */
+router.post('/messages', async (req: Request, res: Response): Promise<void> => {
+  const citizenId = getSessionCitizenId(req);
+  const { message } = req.body;
+
+  if (!message || typeof message !== 'string' || message.trim().length === 0) {
+    res.status(400).json({ error: 'Message text is required.' });
+    return;
+  }
+
+  if (message.length > 2000) {
+    res.status(400).json({ error: 'Message too long. Maximum 2000 characters.' });
+    return;
+  }
+
+  const messageText = message.trim();
+
+  // Insert message — backend sets citizen_id and sender_type
+  const { data: inserted, error } = await supabaseAdmin
+    .from('emergency_messages')
+    .insert({
+      citizen_id: citizenId,            // Always from session
+      sender_type: 'CITIZEN',            // Always set by backend
+      message: messageText,
+      message_type: 'TEXT',
+    })
+    .select('id, sender_type, message, message_type, created_at')
+    .single();
+
+  if (error || !inserted) {
+    res.status(500).json({ error: 'Failed to send message.' });
+    return;
+  }
+
+  await auditLog('CITIZEN_MESSAGE_SENT', 'CITIZEN', String(citizenId));
+
+  // Optionally classify with Groq in background — non-blocking
+  classifyEmergencyMessage(messageText).then(async (classification) => {
+    if (classification) {
+      // Update message metadata with AI classification
+      await supabaseAdmin
+        .from('emergency_messages')
+        .update({ metadata: { ai_classification: classification } })
+        .eq('id', inserted.id);
+
+      // If AI detects high urgency, update citizen status
+      if ((classification.urgency === 'HIGH' || classification.urgency === 'CRITICAL') &&
+          classification.intent !== 'SAFE') {
+        await supabaseAdmin
+          .from('citizens')
+          .update({ status: 'URGENT' })
+          .eq('id', citizenId);
+      }
+    }
+  }).catch(err => {
+    console.error('[GROQ] Background classification error:', err);
+  });
+
+  res.status(201).json({ message: inserted });
+});
+
+/**
+ * POST /api/citizen/status
+ * Updates the authenticated citizen's emergency status.
+ * Also records a status history entry.
+ */
+router.post('/status', async (req: Request, res: Response): Promise<void> => {
+  const citizenId = getSessionCitizenId(req);
+  const { action, notes } = req.body;
+
+  const validActions = ['SAFE', 'HELP', 'MEDICAL', 'EVACUATION'];
+  if (!action || !validActions.includes(action)) {
+    res.status(400).json({ error: 'Invalid action. Must be one of: SAFE, HELP, MEDICAL, EVACUATION' });
+    return;
+  }
+
+  // Determine new status and category
+  const newStatus = action === 'SAFE' ? 'SAFE' : 'URGENT';
+  const category = action === 'MEDICAL' ? 'MEDICAL' :
+                   action === 'EVACUATION' ? 'EVACUATION' :
+                   action === 'HELP' ? 'GENERAL' : undefined;
+
+  // Get current status for history
+  const { data: current } = await supabaseAdmin
+    .from('citizens')
+    .select('status')
+    .eq('id', citizenId)
+    .maybeSingle();
+
+  const previousStatus = current?.status;
+
+  // Update citizen status
+  const { error: updateError } = await supabaseAdmin
+    .from('citizens')
+    .update({ status: newStatus })
+    .eq('id', citizenId);
+
+  if (updateError) {
+    res.status(500).json({ error: 'Failed to update status.' });
+    return;
+  }
+
+  // Record status history
+  await supabaseAdmin.from('citizen_status_history').insert({
+    citizen_id: citizenId,
+    previous_status: previousStatus,
+    new_status: newStatus,
+    category,
+    source: 'CITIZEN',
+    metadata: { notes: notes || null, action },
+  });
+
+  // Add system message to chat
+  const statusMessage = {
+    SAFE: 'Your status has been updated to SAFE. Emergency services have been notified.',
+    HELP: 'Your request for assistance has been registered. A response team will be alerted.',
+    MEDICAL: 'MEDICAL EMERGENCY registered. Prioritized response team dispatched.',
+    EVACUATION: 'EVACUATION request registered. Your location is being tracked.',
+  }[action as 'SAFE' | 'HELP' | 'MEDICAL' | 'EVACUATION'];
+
+  await supabaseAdmin.from('emergency_messages').insert({
+    citizen_id: citizenId,
+    sender_type: 'SYSTEM',
+    message: statusMessage,
+    message_type: 'STATUS_UPDATE',
+  });
+
+  await auditLog('STATUS_CHANGED', 'CITIZEN', String(citizenId), {
+    previousStatus,
+    newStatus,
+    action,
+    category,
+  });
+
+  res.json({ success: true, status: newStatus, category });
+});
+
+export default router;
