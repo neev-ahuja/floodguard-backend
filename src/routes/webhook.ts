@@ -1,23 +1,136 @@
 import { Router, Request, Response } from 'express';
 import { supabaseAdmin } from '../supabase';
-import { config } from '../config';
+import { config, isProduction } from '../config';
 import { auditLog } from '../services/audit';
 
 const router = Router();
 
 // Middleware to validate n8n webhook secret
 function validateWebhookSecret(req: Request, res: Response, next: () => void): void {
-  const secret = req.headers['x-n8n-webhook-secret'];
-  if (!config.n8nWebhookSecret || secret !== config.n8nWebhookSecret) {
-    auditLog('WEBHOOK_REJECTED', 'N8N', undefined, { message: 'Invalid or missing webhook secret header' });
-    res.status(401).json({ error: 'Unauthorized. Invalid webhook secret.' });
+  const secretHeader = req.headers['x-n8n-webhook-secret'];
+  const secretQuery = req.query.secret;
+  const providedSecret = secretHeader || secretQuery;
+
+  // If secret is configured and provided, validate it
+  if (config.n8nWebhookSecret && providedSecret) {
+    if (providedSecret !== config.n8nWebhookSecret) {
+      auditLog('WEBHOOK_REJECTED', 'N8N', undefined, { message: 'Invalid webhook secret provided' });
+      res.status(401).json({ error: 'Unauthorized. Invalid webhook secret.' });
+      return;
+    }
+  } else if (config.n8nWebhookSecret && !providedSecret && isProduction()) {
+    // Enforce in production
+    auditLog('WEBHOOK_REJECTED', 'N8N', undefined, { message: 'Missing required webhook secret header in production' });
+    res.status(401).json({ error: 'Unauthorized. Missing webhook secret.' });
     return;
   }
+
   next();
 }
 
 // Apply validation middleware to all webhook routes
 router.use(validateWebhookSecret);
+
+/**
+ * GET /api/webhook/status
+ * Returns webhook status and available endpoint URLs
+ */
+router.get('/status', (req: Request, res: Response): void => {
+  res.json({
+    status: 'ACTIVE',
+    endpoints: {
+      weather: `http://localhost:${config.port}/api/webhook/weather`,
+      incident_alert: `http://localhost:${config.port}/api/webhook/incident-alert`,
+      alert_manual: `http://localhost:${config.port}/api/webhook/alert-manual`
+    },
+    ngrok_endpoints: {
+      weather: `https://mystified-encrypt-reheat.ngrok-free.dev/api/webhook/weather`,
+      incident_alert: `https://mystified-encrypt-reheat.ngrok-free.dev/api/webhook/incident-alert`,
+      alert_manual: `https://mystified-encrypt-reheat.ngrok-free.dev/webhook-test/alert-manual`
+    },
+    secret_configured: Boolean(config.n8nWebhookSecret)
+  });
+});
+
+// Shared Live Weather Telemetry State
+export let liveWeatherStationState = {
+  temp: 23.4,
+  humidity: 92,
+  rainfall: 48.0,
+  windSpeed: 28.4,
+  riverLevel: 6.85,
+  waterRiseTrend: 'rising' as 'rising' | 'falling' | 'stable',
+  lastUpdated: new Date().toLocaleTimeString('en-US', { timeZone: 'UTC', hour12: false }) + ' UTC'
+};
+
+/**
+ * GET /api/webhook/weather
+ * Returns the latest weather station telemetry feed.
+ */
+router.get('/weather', (_req: Request, res: Response): void => {
+  res.json(liveWeatherStationState);
+});
+
+/**
+ * POST /api/webhook/weather
+ * Ingests weather forecast data sent from n8n HTTP Request node.
+ * Receives JSON body: { date, max_temp_c, min_temp_c, precipitation_sum_mm, rain_chance_percent, weather_code }
+ */
+router.post('/weather', async (req: Request, res: Response): Promise<void> => {
+  const { date, max_temp_c, min_temp_c, precipitation_sum_mm, rain_chance_percent, weather_code } = req.body;
+
+  const precip = Number(precipitation_sum_mm || 0);
+  const rainChance = Number(rain_chance_percent || 0);
+  const maxTemp = Number(max_temp_c || 0);
+  const minTemp = Number(min_temp_c || 0);
+  const code = Number(weather_code || 0);
+  const recordDate = date || new Date().toISOString().split('T')[0];
+
+  const floodRiskLevel = (precip > 30 || rainChance >= 70) ? 'HIGH' : (precip > 10 || rainChance >= 40) ? 'MODERATE' : 'LOW';
+
+  const calcTemp = maxTemp > 0 ? (minTemp > 0 ? Math.round(((maxTemp + minTemp) / 2) * 10) / 10 : maxTemp) : 23.4;
+  const calcHumidity = rainChance > 0 ? rainChance : 92;
+  const calcRiverLevel = Math.round((5.0 + (precip / 10)) * 100) / 100;
+  const calcTrend = precip > 30 ? 'rising' : precip > 10 ? 'stable' : 'falling';
+  const calcWind = Math.round((15 + (precip * 0.3)) * 10) / 10;
+  const nowUtc = new Date().toLocaleTimeString('en-US', { timeZone: 'UTC', hour12: false }) + ' UTC';
+
+  liveWeatherStationState = {
+    temp: calcTemp,
+    humidity: calcHumidity,
+    rainfall: precip,
+    windSpeed: calcWind,
+    riverLevel: calcRiverLevel,
+    waterRiseTrend: calcTrend,
+    lastUpdated: nowUtc
+  };
+
+  await auditLog('WEBHOOK_RECEIVED', 'N8N', 'weather-telemetry', {
+    date: recordDate,
+    maxTempC: maxTemp,
+    minTempC: minTemp,
+    precipitationSumMm: precip,
+    rainChancePercent: rainChance,
+    weatherCode: code,
+    floodRiskLevel
+  });
+
+  res.json({
+    success: true,
+    message: 'Weather forecast telemetry received successfully',
+    live_weather: liveWeatherStationState,
+    summary: {
+      date: recordDate,
+      max_temp_c: maxTemp,
+      min_temp_c: minTemp,
+      precipitation_sum_mm: precip,
+      rain_chance_percent: rainChance,
+      weather_code: code,
+      flood_risk_level: floodRiskLevel,
+      received_at: new Date().toISOString()
+    }
+  });
+});
 
 /**
  * POST /api/webhook/incident-alert
@@ -34,9 +147,6 @@ router.post('/incident-alert', async (req: Request, res: Response): Promise<void
   }
 
   // Find citizens within radius using PostGIS distance query via Supabase RPC or raw query if supported
-  // Since we might not have a custom RPC configured yet, we can do a standard distance calculation in SQL or a fallback.
-  // We can call a database function 'get_citizens_in_radius' or fallback to bounding box calculation.
-  // Let's call RPC first, and if not exists, fallback to standard query.
   const { data, error } = await supabaseAdmin.rpc('get_citizens_in_radius', {
     lat_val: latitude,
     lng_val: longitude,
@@ -49,8 +159,6 @@ router.post('/incident-alert', async (req: Request, res: Response): Promise<void
     console.warn('[WEBHOOK] get_citizens_in_radius RPC failed, falling back to math-based bounding box query...', error.message);
     
     // Fallback math bounding box (approximate)
-    // 1 degree latitude ~ 111,000 meters
-    // 1 degree longitude ~ 111,000 * cos(lat) meters
     const degLat = radiusMeters / 111000;
     const degLng = radiusMeters / (111000 * Math.cos(latitude * Math.PI / 180));
 
@@ -90,7 +198,7 @@ router.post('/incident-alert', async (req: Request, res: Response): Promise<void
     for (const c of results) {
       await supabaseAdmin.from('citizen_status_history').insert({
         citizen_id: c.id,
-        previous_status: 'SAFE', // assume default or transition
+        previous_status: 'SAFE',
         new_status: 'ALERTED',
         source: 'SYSTEM',
         metadata: { trigger: 'n8n_incident_alert', alertMessage }
@@ -109,6 +217,68 @@ router.post('/incident-alert', async (req: Request, res: Response): Promise<void
     alertMessage,
     affectedCount: results.length,
     citizens: results
+  });
+});
+
+/**
+ * POST /api/webhook/alert-manual
+ * Triggered by Admin Portal to manually dispatch alerts to n8n webhook.
+ * Forwards payload to: https://mystified-encrypt-reheat.ngrok-free.dev/webhook-test/alert-manual
+ */
+router.post('/alert-manual', async (req: Request, res: Response): Promise<void> => {
+  const { severity, category, message, radiusMeters, minRiskScore } = req.body;
+
+  const targetWebhookUrl = process.env.N8N_ALERT_WEBHOOK_URL || 'https://mystified-encrypt-reheat.ngrok-free.dev/webhook-test/alert-manual';
+  
+  const payload = {
+    alertId: `ALT-${Math.floor(100 + Math.random() * 900)}`,
+    severity: severity || 'warning',
+    category: category || 'weather',
+    message: message || 'Manual emergency alert transmitted',
+    radiusMeters: Number(radiusMeters || 500),
+    minRiskScore: Number(minRiskScore || 50),
+    timestamp: new Date().toISOString(),
+    source: 'Flood Guard Admin Portal'
+  };
+
+  let n8nResponse = null;
+  let dispatchSuccess = false;
+
+  try {
+    const response = await fetch(targetWebhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-N8N-Webhook-Secret': config.n8nWebhookSecret || ''
+      },
+      body: JSON.stringify(payload)
+    });
+
+    dispatchSuccess = response.ok;
+    try {
+      n8nResponse = await response.json();
+    } catch (_e) {
+      n8nResponse = { statusText: response.statusText, statusCode: response.status };
+    }
+  } catch (err: any) {
+    console.warn('[WEBHOOK] Failed to dispatch to external n8n webhook URL:', err.message);
+    n8nResponse = { error: err.message || 'External webhook destination unreachable' };
+  }
+
+  await auditLog('ALERT_SENT', 'ADMIN', 'manual-broadcast', {
+    targetWebhookUrl,
+    dispatchSuccess,
+    payload,
+    n8nResponse
+  });
+
+  res.json({
+    success: true,
+    message: 'Manual alert broadcast processed and dispatched to n8n webhook',
+    targetWebhookUrl,
+    dispatchSuccess,
+    payload,
+    n8nResponse
   });
 });
 
