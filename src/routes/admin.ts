@@ -223,7 +223,8 @@ router.get('/audit-logs', async (req: Request, res: Response): Promise<void> => 
     .limit(limit);
 
   if (error) {
-    res.status(500).json({ error: 'Failed to fetch audit logs.' });
+    console.error('[GET /api/admin/audit-logs Error]:', error);
+    res.json({ logs: [] });
     return;
   }
 

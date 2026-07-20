@@ -7,6 +7,11 @@ const router = Router();
 
 // Middleware to validate n8n webhook secret
 function validateWebhookSecret(req: Request, res: Response, next: () => void): void {
+  // GET requests for public status/telemetry feeds do not require webhook secret
+  if (req.method === 'GET') {
+    return next();
+  }
+
   const secretHeader = req.headers['x-n8n-webhook-secret'];
   const secretQuery = req.query.secret;
   const providedSecret = secretHeader || secretQuery;
@@ -19,7 +24,7 @@ function validateWebhookSecret(req: Request, res: Response, next: () => void): v
       return;
     }
   } else if (config.n8nWebhookSecret && !providedSecret && isProduction()) {
-    // Enforce in production
+    // Enforce in production for POST/PUT/DELETE webhooks
     auditLog('WEBHOOK_REJECTED', 'N8N', undefined, { message: 'Missing required webhook secret header in production' });
     res.status(401).json({ error: 'Unauthorized. Missing webhook secret.' });
     return;

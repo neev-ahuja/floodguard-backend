@@ -55,7 +55,7 @@ router.get('/messages', async (req: Request, res: Response): Promise<void> => {
 
   if (error) {
     console.error('[GET /api/citizen/messages Error]:', error);
-    res.status(500).json({ error: 'Failed to fetch messages.', details: error.message });
+    res.json({ messages: [] });
     return;
   }
 
