@@ -24,11 +24,11 @@ ALTER TABLE citizens ADD COLUMN IF NOT EXISTS address TEXT;
 ALTER TABLE citizens ADD COLUMN IF NOT EXISTS elevation DOUBLE PRECISION DEFAULT 0.0;
 ALTER TABLE citizens ADD COLUMN IF NOT EXISTS distance_to_river DOUBLE PRECISION DEFAULT 0.0;
 
--- Seed initial citizens if empty
-INSERT INTO citizens (name, email, phone, address, latitude, longitude, elevation, distance_to_river, risk_score, status, children_count, elderly_count, mobility_issues, access_token)
+-- Seed initial citizens if empty (omitting generated column risk_score)
+INSERT INTO citizens (name, email, phone, address, latitude, longitude, elevation, distance_to_river, status, children_count, elderly_count, mobility_issues, access_token)
 VALUES 
-('Neev Ahuja', 'neev.ahuja@floodguard.gov', '+1 (555) 019-2834', '124 Riverview Road, Sector 7G', 40.7328, -74.0150, 4.2, 120.0, 78.0, 'SAFE', 1, 0, false, 'dTNScjFkXzAx'),
-('Sarah Jenkins', 'sarah.j@netlink.com', '+1 (555) 019-8871', '12 Waterfront Drive, Sector 7G', 40.7302, -74.0185, 2.1, 45.0, 92.0, 'URGENT', 0, 1, true, 'dTNScjFkXzAy')
+('Neev Ahuja', 'neev.ahuja@floodguard.gov', '+1 (555) 019-2834', '124 Riverview Road, Sector 7G', 40.7328, -74.0150, 4.2, 120.0, 'SAFE', 1, 0, false, 'dTNScjFkXzAx'),
+('Sarah Jenkins', 'sarah.j@netlink.com', '+1 (555) 019-8871', '12 Waterfront Drive, Sector 7G', 40.7302, -74.0185, 2.1, 45.0, 'URGENT', 0, 1, true, 'dTNScjFkXzAy')
 ON CONFLICT (access_token) DO NOTHING;
 
 -- 1. Create emergency_messages table
