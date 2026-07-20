@@ -26,7 +26,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-N8N-Webhook-Secret', 'Cookie', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Citizen-Token', 'X-Admin-Token', 'X-N8N-Webhook-Secret', 'Cookie', 'X-Requested-With'],
 }));
 
 // Parse body
