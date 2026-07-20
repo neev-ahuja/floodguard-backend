@@ -32,8 +32,8 @@ app.use(cors({
 // Parse body
 app.use(express.json());
 
-// Session Management
-const isCrossSite = isProduction() || Boolean(process.env.RENDER) || Boolean(process.env.VERCEL) || process.env.NODE_ENV !== 'development';
+// Session Management - Enforce SameSite=None and Secure for cross-origin HTTPS (Render -> Vercel)
+const isCrossSite = true;
 
 app.use(
   session({
