@@ -33,17 +33,20 @@ app.use(cors({
 app.use(express.json());
 
 // Session Management
+const isCrossSite = isProduction() || Boolean(process.env.RENDER) || Boolean(process.env.VERCEL) || process.env.NODE_ENV !== 'development';
+
 app.use(
   session({
     secret: config.sessionSecret,
     resave: false,
     saveUninitialized: false,
-    name: 'connect.sid', // default session cookie name
+    name: 'connect.sid',
+    proxy: true,
     cookie: {
       httpOnly: true,
-      secure: isProduction(), // Require HTTPS in production
-      sameSite: isProduction() ? 'none' : 'lax', // None for cross-origin credentials, Lax for development
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      secure: isCrossSite,
+      sameSite: isCrossSite ? 'none' : 'lax',
+      maxAge: 24 * 60 * 60 * 1000,
     },
   })
 );
