@@ -49,23 +49,34 @@ router.get('/citizens/:citizenId/messages', async (req: Request, res: Response):
   }
 
   const { data, error } = await supabaseAdmin
-    .from('emergency_messages')
-    .select('id, citizen_id, sender_type, message, message_type, created_at, read_at, metadata')
+    .from('chat_messages')
+    .select('id, citizen_id, sender, message, created_at')
     .eq('citizen_id', citizenId)
     .order('created_at', { ascending: true });
 
   if (error) {
-    res.status(500).json({ error: 'Failed to fetch messages.' });
+    console.error('[GET /api/admin/citizens/:citizenId/messages Error]:', error);
+    res.json({ messages: [] });
     return;
   }
 
-  res.json({ messages: data || [] });
+  const formatted = (data || []).map(m => ({
+    id: m.id,
+    citizen_id: m.citizen_id,
+    sender: m.sender,
+    sender_type: m.sender,
+    message: m.message,
+    created_at: m.created_at
+  }));
+
+  res.json({ messages: formatted });
 });
 
 /**
  * POST /api/admin/citizens/:citizenId/messages
  * Sends an admin reply to a specific citizen.
- * Backend sets sender_type = ADMIN.
+ * Backend sets sender = ADMIN.
+ * THIS INSERTS INTO chat_messages WITH sender = 'ADMIN' WHICH TRIGGERS notify_n8n_on_admin_message IN SUPABASE!
  */
 router.post('/citizens/:citizenId/messages', async (req: Request, res: Response): Promise<void> => {
   const citizenId = parseInt(req.params.citizenId as string);
@@ -83,25 +94,29 @@ router.post('/citizens/:citizenId/messages', async (req: Request, res: Response)
   const adminUsername = req.session?.admin?.username;
 
   const { data: inserted, error } = await supabaseAdmin
-    .from('emergency_messages')
+    .from('chat_messages')
     .insert({
       citizen_id: citizenId,
-      sender_type: 'ADMIN',   // Always set by backend — never from frontend
+      sender: 'ADMIN',
       message: message.trim(),
-      message_type: 'TEXT',
-      metadata: { admin: adminUsername },
     })
-    .select('id, sender_type, message, message_type, created_at')
+    .select('id, citizen_id, sender, message, created_at')
     .single();
 
   if (error || !inserted) {
+    console.error('[POST /api/admin/citizens/:citizenId/messages Error]:', error);
     res.status(500).json({ error: 'Failed to send message.' });
     return;
   }
 
   await auditLog('ADMIN_MESSAGE_SENT', 'ADMIN', adminUsername, { citizenId });
 
-  res.status(201).json({ message: inserted });
+  res.status(201).json({ 
+    message: {
+      ...inserted,
+      sender_type: inserted.sender
+    } 
+  });
 });
 
 /**
@@ -185,18 +200,17 @@ router.get('/dashboard', async (_req: Request, res: Response): Promise<void> => 
     withElderly: all.filter(c => (c.elderly_count || 0) > 0).length,
   };
 
-  // Count unread messages
+  // Count citizen messages
   const { count: unreadCount } = await supabaseAdmin
-    .from('emergency_messages')
+    .from('chat_messages')
     .select('*', { count: 'exact', head: true })
-    .eq('sender_type', 'CITIZEN')
-    .is('read_at', null);
+    .eq('sender', 'CITIZEN');
 
   // Count active conversations (citizens with at least one message)
   const { data: activeConvos } = await supabaseAdmin
-    .from('emergency_messages')
+    .from('chat_messages')
     .select('citizen_id')
-    .eq('sender_type', 'CITIZEN');
+    .eq('sender', 'CITIZEN');
 
   const uniqueActiveConvos = new Set(activeConvos?.map(m => m.citizen_id) || []).size;
 

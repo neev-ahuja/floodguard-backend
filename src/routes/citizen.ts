@@ -48,8 +48,8 @@ router.get('/messages', async (req: Request, res: Response): Promise<void> => {
   }
 
   const { data, error } = await supabaseAdmin
-    .from('emergency_messages')
-    .select('id, sender_type, message, message_type, created_at, read_at, metadata')
+    .from('chat_messages')
+    .select('id, citizen_id, sender, message, created_at')
     .eq('citizen_id', citizenId)
     .order('created_at', { ascending: true });
 
@@ -59,14 +59,22 @@ router.get('/messages', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  res.json({ messages: data || [] });
+  const formatted = (data || []).map(m => ({
+    id: m.id,
+    citizen_id: m.citizen_id,
+    sender: m.sender,
+    sender_type: m.sender,
+    message: m.message,
+    created_at: m.created_at
+  }));
+
+  res.json({ messages: formatted });
 });
 
 /**
  * POST /api/citizen/messages
  * Sends a message from the authenticated citizen.
- * Backend automatically sets citizen_id and sender_type = CITIZEN.
- * Frontend CANNOT supply their own citizen_id.
+ * Backend automatically sets citizen_id and sender = CITIZEN.
  */
 router.post('/messages', async (req: Request, res: Response): Promise<void> => {
   const citizenId = getSessionCitizenId(req);
@@ -84,19 +92,19 @@ router.post('/messages', async (req: Request, res: Response): Promise<void> => {
 
   const messageText = message.trim();
 
-  // Insert message — backend sets citizen_id and sender_type
+  // Insert message into chat_messages
   const { data: inserted, error } = await supabaseAdmin
-    .from('emergency_messages')
+    .from('chat_messages')
     .insert({
-      citizen_id: citizenId,            // Always from session
-      sender_type: 'CITIZEN',            // Always set by backend
+      citizen_id: citizenId,
+      sender: 'CITIZEN',
       message: messageText,
-      message_type: 'TEXT',
     })
-    .select('id, sender_type, message, message_type, created_at')
+    .select('id, citizen_id, sender, message, created_at')
     .single();
 
   if (error || !inserted) {
+    console.error('[POST /api/citizen/messages Error]:', error);
     res.status(500).json({ error: 'Failed to send message.' });
     return;
   }
@@ -106,13 +114,6 @@ router.post('/messages', async (req: Request, res: Response): Promise<void> => {
   // Optionally classify with Groq in background — non-blocking
   classifyEmergencyMessage(messageText).then(async (classification) => {
     if (classification) {
-      // Update message metadata with AI classification
-      await supabaseAdmin
-        .from('emergency_messages')
-        .update({ metadata: { ai_classification: classification } })
-        .eq('id', inserted.id);
-
-      // If AI detects high urgency, update citizen status
       if ((classification.urgency === 'HIGH' || classification.urgency === 'CRITICAL') &&
           classification.intent !== 'SAFE') {
         await supabaseAdmin
@@ -121,11 +122,14 @@ router.post('/messages', async (req: Request, res: Response): Promise<void> => {
           .eq('id', citizenId);
       }
     }
-  }).catch(err => {
-    console.error('[GROQ] Background classification error:', err);
-  });
+  }).catch(() => {});
 
-  res.status(201).json({ message: inserted });
+  res.status(201).json({ 
+    message: {
+      ...inserted,
+      sender_type: inserted.sender
+    } 
+  });
 });
 
 /**
