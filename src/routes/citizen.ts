@@ -183,19 +183,20 @@ router.post('/status', async (req: Request, res: Response): Promise<void> => {
     metadata: { notes: notes || null, action },
   });
 
-  // Add system message to chat
-  const statusMessage = {
-    SAFE: 'Your status has been updated to SAFE. Emergency services have been notified.',
-    HELP: 'Your request for assistance has been registered. A response team will be alerted.',
-    MEDICAL: 'MEDICAL EMERGENCY registered. Prioritized response team dispatched.',
-    EVACUATION: 'EVACUATION request registered. Your location is being tracked.',
-  }[action as 'SAFE' | 'HELP' | 'MEDICAL' | 'EVACUATION'];
+  // Insert status alert into chat_messages so it appears in Admin Live Dispatch Chat
+  const actionLabel = {
+    SAFE: "I'm Safe / Secure",
+    HELP: "Need Assistance",
+    MEDICAL: "Family Needs Help",
+    EVACUATION: "Evacuating Zone",
+  }[action as 'SAFE' | 'HELP' | 'MEDICAL' | 'EVACUATION'] || action;
 
-  await supabaseAdmin.from('emergency_messages').insert({
+  const alertMessage = `🚨 [EMERGENCY ALERT] ${actionLabel}${notes && notes.trim() ? `\nNotes: "${notes.trim()}"` : ''}`;
+
+  await supabaseAdmin.from('chat_messages').insert({
     citizen_id: citizenId,
-    sender_type: 'SYSTEM',
-    message: statusMessage,
-    message_type: 'STATUS_UPDATE',
+    sender: 'CITIZEN',
+    message: alertMessage,
   });
 
   await auditLog('STATUS_CHANGED', 'CITIZEN', String(citizenId), {
