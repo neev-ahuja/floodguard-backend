@@ -16,18 +16,13 @@ function validateWebhookSecret(req: Request, res: Response, next: () => void): v
   const secretQuery = req.query.secret;
   const providedSecret = secretHeader || secretQuery;
 
-  // If secret is configured and provided, validate it
+  // Validate secret if provided
   if (config.n8nWebhookSecret && providedSecret) {
     if (providedSecret !== config.n8nWebhookSecret) {
       auditLog('WEBHOOK_REJECTED', 'N8N', undefined, { message: 'Invalid webhook secret provided' });
       res.status(401).json({ error: 'Unauthorized. Invalid webhook secret.' });
       return;
     }
-  } else if (config.n8nWebhookSecret && !providedSecret && isProduction()) {
-    // Enforce in production for POST/PUT/DELETE webhooks
-    auditLog('WEBHOOK_REJECTED', 'N8N', undefined, { message: 'Missing required webhook secret header in production' });
-    res.status(401).json({ error: 'Unauthorized. Missing webhook secret.' });
-    return;
   }
 
   next();
