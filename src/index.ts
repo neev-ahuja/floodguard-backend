@@ -15,12 +15,15 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 
-// CORS Configuration
+// CORS Configuration - Allow all origins with credentials support
 app.use(cors({
-  origin: config.frontendUrl,
+  origin: (origin, callback) => {
+    // Dynamically reflect requesting origin to allow CORS for all origins (Vercel, localhost, ngrok, etc.)
+    callback(null, origin || true);
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-N8N-Webhook-Secret', 'Cookie'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-N8N-Webhook-Secret', 'Cookie', 'X-Requested-With'],
 }));
 
 // Parse body
