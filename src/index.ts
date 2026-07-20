@@ -10,6 +10,9 @@ import webhookRoutes from './routes/webhook';
 
 const app = express();
 
+// Trust reverse proxies (Render, Vercel, Nginx, Cloudflare) to ensure HTTPS cookies are set
+app.set('trust proxy', 1);
+
 // Security Headers
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
