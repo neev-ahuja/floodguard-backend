@@ -52,10 +52,6 @@ export async function getCitizenPublicProfile(citizenId: number) {
   return data;
 }
 
-/**
- * Generates a personalized emergency link for a citizen.
- * Retrieves existing access_token — does NOT create a new one.
- */
 export async function generateCitizenEmergencyLink(
   citizenId: number,
   publicAppUrl: string
@@ -68,6 +64,6 @@ export async function generateCitizenEmergencyLink(
 
   if (error || !data?.access_token) return null;
 
-  // Token is used only for URL generation — never returned to API responses
-  return `${publicAppUrl}/respond?token=${data.access_token}`;
+  // Token in ?q= param enables direct URL one-click citizen login
+  return `${publicAppUrl}/?q=${data.access_token}`;
 }

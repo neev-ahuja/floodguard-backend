@@ -231,13 +231,12 @@ router.post('/incident-alert', async (req: Request, res: Response): Promise<void
     affectedCitizens = fallbackData;
   }
 
-  // Filter or process citizens list
   const results = (affectedCitizens || []).map((c: any) => ({
     id: c.id,
     name: c.name,
     email: c.email,
     access_token: c.access_token, // Safe because this endpoint is protected by n8n webhook secret
-    link: `${config.publicAppUrl}/respond?token=${c.access_token}`
+    link: `${config.publicAppUrl}/?q=${c.access_token}`
   }));
 
   // Update their status to ALERTED in batch
