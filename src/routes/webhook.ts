@@ -52,6 +52,20 @@ router.get('/status', (req: Request, res: Response): void => {
   });
 });
 
+// Helper functions to clean n8n expression values (e.g. "=2026-07-20" or "=95")
+function parseN8nValue(val: any): string {
+  if (val === null || val === undefined) return '';
+  const str = String(val).trim();
+  return str.startsWith('=') ? str.substring(1).trim() : str;
+}
+
+function parseN8nNumber(val: any, fallback = 0): number {
+  if (val === null || val === undefined) return fallback;
+  const cleaned = parseN8nValue(val);
+  const num = parseFloat(cleaned);
+  return isNaN(num) ? fallback : num;
+}
+
 // Shared Live Weather Telemetry State
 export let liveWeatherStationState = {
   temp: 23.4,
@@ -60,7 +74,15 @@ export let liveWeatherStationState = {
   windSpeed: 28.4,
   riverLevel: 6.85,
   waterRiseTrend: 'rising' as 'rising' | 'falling' | 'stable',
-  lastUpdated: new Date().toLocaleTimeString('en-US', { timeZone: 'UTC', hour12: false }) + ' UTC'
+  lastUpdated: new Date().toLocaleTimeString('en-US', { timeZone: 'UTC', hour12: false }) + ' UTC',
+  city: 'Chennai',
+  alertStatus: 'NORMAL',
+  isFloodRisk: false,
+  severity: 'LOW',
+  alertMessage: '',
+  recommendedActions: [] as string[],
+  weatherCode: 0,
+  rainChancePercent: 0,
 };
 
 /**
@@ -74,19 +96,34 @@ router.get('/weather', (_req: Request, res: Response): void => {
 /**
  * POST /api/webhook/weather
  * Ingests weather forecast data sent from n8n HTTP Request node.
- * Receives JSON body: { date, max_temp_c, min_temp_c, precipitation_sum_mm, rain_chance_percent, weather_code }
+ * Supports both flat payloads and nested n8n structures (weather_details, leading '=' strings, etc.).
  */
 router.post('/weather', async (req: Request, res: Response): Promise<void> => {
-  const { date, max_temp_c, min_temp_c, precipitation_sum_mm, rain_chance_percent, weather_code } = req.body;
+  const body = req.body || {};
+  const weatherDetails = body.weather_details || {};
 
-  const precip = Number(precipitation_sum_mm || 0);
-  const rainChance = Number(rain_chance_percent || 0);
-  const maxTemp = Number(max_temp_c || 0);
-  const minTemp = Number(min_temp_c || 0);
-  const code = Number(weather_code || 0);
-  const recordDate = date || new Date().toISOString().split('T')[0];
+  // Extract date
+  const rawDate = body.date || weatherDetails.date;
+  const recordDate = parseN8nValue(rawDate) || new Date().toISOString().split('T')[0];
 
-  const floodRiskLevel = (precip > 30 || rainChance >= 70) ? 'HIGH' : (precip > 10 || rainChance >= 40) ? 'MODERATE' : 'LOW';
+  // Extract weather parameters from top-level or nested weather_details
+  const precip = parseN8nNumber(body.precipitation_sum_mm ?? weatherDetails.precipitation_sum_mm, 0);
+  const rainChance = parseN8nNumber(body.rain_chance_percent ?? weatherDetails.rain_chance_percent, 0);
+  const maxTemp = parseN8nNumber(body.max_temp_c ?? weatherDetails.max_temp_c, 0);
+  const minTemp = parseN8nNumber(body.min_temp_c ?? weatherDetails.min_temp_c, 0);
+  const code = parseN8nNumber(body.weather_code ?? weatherDetails.weather_code, 0);
+
+  // Extract n8n alert fields
+  const city = parseN8nValue(body.city) || 'Chennai';
+  const alertStatus = parseN8nValue(body.alert_status) || (precip > 30 || rainChance >= 70 ? 'CRITICAL_FLOOD_RISK' : 'NORMAL');
+  const isFloodRisk = typeof body.is_flood_risk === 'boolean' ? body.is_flood_risk : (precip > 30 || rainChance >= 70);
+  const severity = parseN8nValue(body.severity) || (isFloodRisk ? 'HIGH' : 'LOW');
+  const alertMessage = parseN8nValue(body.alert_message);
+  const recommendedActions = Array.isArray(body.recommended_actions) 
+    ? body.recommended_actions.map((a: any) => parseN8nValue(a)).filter(Boolean)
+    : [];
+
+  const floodRiskLevel = isFloodRisk || precip > 30 || rainChance >= 70 ? 'HIGH' : (precip > 10 || rainChance >= 40) ? 'MODERATE' : 'LOW';
 
   const calcTemp = maxTemp > 0 ? (minTemp > 0 ? Math.round(((maxTemp + minTemp) / 2) * 10) / 10 : maxTemp) : 23.4;
   const calcHumidity = rainChance > 0 ? rainChance : 92;
@@ -102,7 +139,15 @@ router.post('/weather', async (req: Request, res: Response): Promise<void> => {
     windSpeed: calcWind,
     riverLevel: calcRiverLevel,
     waterRiseTrend: calcTrend,
-    lastUpdated: nowUtc
+    lastUpdated: nowUtc,
+    city,
+    alertStatus,
+    isFloodRisk,
+    severity,
+    alertMessage,
+    recommendedActions,
+    weatherCode: code,
+    rainChancePercent: rainChance,
   };
 
   await auditLog('WEBHOOK_RECEIVED', 'N8N', 'weather-telemetry', {
@@ -112,7 +157,10 @@ router.post('/weather', async (req: Request, res: Response): Promise<void> => {
     precipitationSumMm: precip,
     rainChancePercent: rainChance,
     weatherCode: code,
-    floodRiskLevel
+    floodRiskLevel,
+    city,
+    alertStatus,
+    severity
   });
 
   res.json({
@@ -121,12 +169,18 @@ router.post('/weather', async (req: Request, res: Response): Promise<void> => {
     live_weather: liveWeatherStationState,
     summary: {
       date: recordDate,
+      city,
+      alert_status: alertStatus,
+      is_flood_risk: isFloodRisk,
+      severity,
       max_temp_c: maxTemp,
       min_temp_c: minTemp,
       precipitation_sum_mm: precip,
       rain_chance_percent: rainChance,
       weather_code: code,
       flood_risk_level: floodRiskLevel,
+      alert_message: alertMessage,
+      recommended_actions: recommendedActions,
       received_at: new Date().toISOString()
     }
   });
