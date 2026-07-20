@@ -42,6 +42,11 @@ router.get('/messages', async (req: Request, res: Response): Promise<void> => {
   // SECURITY: Always uses session citizen_id — ignores any supplied params
   const citizenId = getSessionCitizenId(req);
 
+  if (!citizenId) {
+    res.status(401).json({ error: 'Citizen session invalid.' });
+    return;
+  }
+
   const { data, error } = await supabaseAdmin
     .from('emergency_messages')
     .select('id, sender_type, message, message_type, created_at, read_at, metadata')
@@ -49,7 +54,8 @@ router.get('/messages', async (req: Request, res: Response): Promise<void> => {
     .order('created_at', { ascending: true });
 
   if (error) {
-    res.status(500).json({ error: 'Failed to fetch messages.' });
+    console.error('[GET /api/citizen/messages Error]:', error);
+    res.status(500).json({ error: 'Failed to fetch messages.', details: error.message });
     return;
   }
 
